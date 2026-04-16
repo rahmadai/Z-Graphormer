@@ -1,6 +1,7 @@
 import os
 import csv
 import argparse
+import time
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -16,7 +17,7 @@ def train_epoch(model, loader, optimizer, device, alpha=0.5):
     total_loss = 0.0
     total_vloss = 0.0
     total_sloss = 0.0
-    for batch in loader:
+    for batch in tqdm(loader, desc="Train", leave=False):
         batch = batch.to(device)
         volt, sec = model(batch)
 
@@ -42,7 +43,7 @@ def evaluate(model, loader, device, alpha=0.5):
     total_vloss = 0.0
     total_sloss = 0.0
     with torch.no_grad():
-        for batch in loader:
+        for batch in tqdm(loader, desc="Val  ", leave=False):
             batch = batch.to(device)
             volt, sec = model(batch)
             v_loss = nn.MSELoss()(volt, batch.y_volt)
@@ -94,9 +95,11 @@ def main():
 
         best_val = float("inf")
         for epoch in range(1, args.epochs + 1):
+            epoch_start = time.time()
             t_loss, t_v, t_s = train_epoch(model, train_loader, optimizer, device, alpha=args.alpha)
             v_loss, v_v, v_s = evaluate(model, val_loader, device, alpha=args.alpha)
-            print(f"Epoch {epoch:03d} | Train: {t_loss:.4f} (V={t_v:.4f}, S={t_s:.4f}) | Val: {v_loss:.4f} (V={v_v:.4f}, S={v_s:.4f})")
+            elapsed = time.time() - epoch_start
+            print(f"Epoch {epoch:03d}/{args.epochs} | {elapsed:.1f}s | Train: {t_loss:.4f} (V={t_v:.4f}, S={t_s:.4f}) | Val: {v_loss:.4f} (V={v_v:.4f}, S={v_s:.4f})")
             writer.writerow([epoch, f"{t_loss:.6f}", f"{t_v:.6f}", f"{t_s:.6f}", f"{v_loss:.6f}", f"{v_v:.6f}", f"{v_s:.6f}"])
             f.flush()
             if v_loss < best_val:
