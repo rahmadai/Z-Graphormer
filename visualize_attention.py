@@ -26,7 +26,9 @@ def plot_sample(model, batch, graph_idx: int = 0, layer_idx: int = -1, save_path
     z_mat = batch.z_matrix[graph_idx].cpu().numpy()  # [N, N]
 
     # Extract attention for chosen layer, averaged over heads
-    attn = all_attns[graph_idx][layer_idx].mean(dim=1).cpu().numpy()  # [N, N]
+    # all_attns is now list of [B, h, N, N] tensors, one per layer
+    attn_batch = all_attns[layer_idx]  # [B, h, N, N]
+    attn = attn_batch[graph_idx, :, :n_nodes, :n_nodes].mean(dim=0).cpu().numpy()  # [N, N]
 
     # Extract predictions / targets for this graph
     v_pred = volt[mask].cpu().numpy().squeeze()
