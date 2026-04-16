@@ -48,7 +48,7 @@ def generate_sample(base_net, contingency_prob: float = 0.3, load_scale_range=(0
         converged = False
 
     if not converged:
-        return None, False, None
+        return None
 
     # Extract node features
     # For each bus: [V_pu, delta_deg, P_gen, Q_gen, type_onehot...]
