@@ -1,3 +1,5 @@
+# models/graphormer_layer.py
+
 import math
 import torch
 import torch.nn as nn
@@ -23,40 +25,44 @@ class GraphormerAttention(nn.Module):
         self.z_encoder = ZBusRelativeEncoding(num_heads=num_heads, num_bins=num_z_bins, max_z=max_z)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor, z_matrix: torch.Tensor, return_attention: bool = False):
+    def forward(self, x: torch.Tensor, z_matrix: torch.Tensor, key_mask: torch.Tensor = None, return_attention: bool = False):
         """
         Args:
-            x: [N, d_model]
-            z_matrix: [N, N] impedance magnitude matrix
+            x: [B, N, d_model]
+            z_matrix: [B, N, N] impedance magnitude matrix
+            key_mask: [B, N] bool, True for padded positions
         Returns:
-            out: [N, d_model]
+            out: [B, N, d_model]
         """
-        N, _ = x.shape
-        q = self.q_proj(x)  # [N, d_model]
+        B, N, _ = x.shape
+        q = self.q_proj(x)  # [B, N, d_model]
         k = self.k_proj(x)
         v = self.v_proj(x)
 
-        # Reshape to [N, num_heads, head_dim]
-        q = q.view(N, self.num_heads, self.head_dim)
-        k = k.view(N, self.num_heads, self.head_dim)
-        v = v.view(N, self.num_heads, self.head_dim)
+        # Reshape to [B, num_heads, N, head_dim]
+        q = q.view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # Attention scores: [N, num_heads, N]
-        scores = torch.einsum("nhd,mhd->nhm", q, k) * self.scale  # [N, num_heads, N]
+        # Attention scores: [B, num_heads, N, N]
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
 
         # Add Z-bus relative bias
-        src = torch.arange(N, device=x.device).repeat_interleave(N)
-        dst = torch.arange(N, device=x.device).repeat(N)
-        z_vals = z_matrix[src, dst]  # [N*N]
-        bias = self.z_encoder(z_vals)  # [N*N, num_heads]
-        bias = bias.view(N, N, self.num_heads).permute(0, 2, 1)  # [N, num_heads, N]
+        z_vals = z_matrix.reshape(-1)  # [B*N*N]
+        bias = self.z_encoder(z_vals)  # [B*N*N, num_heads]
+        bias = bias.view(B, N, N, self.num_heads).permute(0, 3, 1, 2)  # [B, num_heads, N, N]
         scores = scores + bias
 
+        if key_mask is not None:
+            # key_mask: [B, N] -> [B, 1, 1, N]
+            scores = scores.masked_fill(key_mask.unsqueeze(1).unsqueeze(2), float('-inf'))
+
         attn = torch.softmax(scores, dim=-1)
+        attn = torch.nan_to_num(attn, 0.0)
         attn = self.dropout(attn)
 
-        out = torch.einsum("nhm,mhd->nhd", attn, v)  # [N, num_heads, head_dim]
-        out = out.reshape(N, self.d_model)
+        out = torch.matmul(attn, v)  # [B, num_heads, N, head_dim]
+        out = out.transpose(1, 2).reshape(B, N, self.d_model)
         out = self.out_proj(out)
         if return_attention:
             return out, attn
@@ -79,12 +85,12 @@ class GraphormerLayer(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def forward(self, x: torch.Tensor, z_matrix: torch.Tensor, return_attention: bool = False):
+    def forward(self, x: torch.Tensor, z_matrix: torch.Tensor, key_mask: torch.Tensor = None, return_attention: bool = False):
         if return_attention:
-            attn_out, attn = self.attn(self.norm1(x), z_matrix, return_attention=True)
+            attn_out, attn = self.attn(self.norm1(x), z_matrix, key_mask=key_mask, return_attention=True)
             x = x + attn_out
             x = x + self.ffn(self.norm2(x))
             return x, attn
-        x = x + self.attn(self.norm1(x), z_matrix)
+        x = x + self.attn(self.norm1(x), z_matrix, key_mask=key_mask)
         x = x + self.ffn(self.norm2(x))
         return x

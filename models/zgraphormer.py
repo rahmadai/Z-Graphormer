@@ -1,3 +1,5 @@
+# models/zgraphormer.py
+
 import torch
 import torch.nn as nn
 from torch_geometric.data import Batch
@@ -12,12 +14,6 @@ class CentralityEncoding(nn.Module):
         self.embedding = nn.Embedding(num_bins, d_model)
 
     def forward(self, centrality: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            centrality: [N] discrete bin indices (0-9)
-        Returns:
-            enc: [N, d_model]
-        """
         return self.embedding(centrality)
 
 
@@ -76,33 +72,42 @@ class ZGraphormer(nn.Module):
         # Input projection + centrality
         h = self.in_proj(x) + self.centrality_enc(centrality)
 
-        # Process each graph independently
+        # Build padded batch for batched attention
         graph_ids = torch.unique(assign, sorted=True)
-        outputs = []
-        all_attns = []  # list of list of tensors per graph per layer
-        for gid in graph_ids:
-            mask = assign == gid
-            h_g = h[mask]  # [N_i, d_model]
-            z_g = z_matrices[gid] if isinstance(z_matrices, list) else z_matrices[mask][:, mask]
-            graph_attns = []
-            for layer in self.layers:
-                if return_attention:
-                    h_g, attn = layer(h_g, z_g, return_attention=True)
-                    graph_attns.append(attn.detach().cpu())
-                else:
-                    h_g = layer(h_g, z_g)
-            outputs.append(h_g)
-            if return_attention:
-                all_attns.append(graph_attns)
+        sizes = [(assign == gid).sum().item() for gid in graph_ids]
+        max_n = max(sizes)
+        B = len(graph_ids)
 
-        h = torch.cat(outputs, dim=0)  # [total_N, d_model]
+        h_pad = torch.zeros(B, max_n, h.shape[-1], device=h.device)
+        z_pad = torch.zeros(B, max_n, max_n, device=h.device)
+        key_mask = torch.ones(B, max_n, dtype=torch.bool, device=h.device)
 
-        volt = self.voltage_head(h)  # [total_N, 1]
-        # Security: global mean pool per graph
-        sec = torch.zeros(len(graph_ids), 1, device=h.device)
         for i, gid in enumerate(graph_ids):
             mask = assign == gid
-            sec[i] = self.security_head(h[mask].mean(dim=0))
+            n_i = sizes[i]
+            h_pad[i, :n_i] = h[mask]
+            z_pad[i, :n_i, :n_i] = z_matrices[i].to(h.device)
+            key_mask[i, :n_i] = False  # False = valid token
+
+        # Run all layers on the padded batch — single GPU call
+        all_attns = []
+        for layer in self.layers:
+            if return_attention:
+                h_pad, attn = layer(h_pad, z_pad, key_mask=key_mask, return_attention=True)
+                all_attns.append(attn.detach().cpu())
+            else:
+                h_pad = layer(h_pad, z_pad, key_mask=key_mask)
+
+        # Unpad node representations
+        h_list = [h_pad[i, :sizes[i]] for i in range(B)]
+        h = torch.cat(h_list, dim=0)  # [total_N, d_model]
+
+        volt = self.voltage_head(h)  # [total_N, 1]
+
+        # Security: global mean pool per graph (mask-aware, no Python loop)
+        valid_counts = (~key_mask).sum(dim=1).clamp(min=1)  # [B]
+        h_mean = (h_pad * (~key_mask).unsqueeze(-1)).sum(dim=1) / valid_counts.unsqueeze(-1)  # [B, d_model]
+        sec = self.security_head(h_mean)  # [B, 1]
 
         if return_attention:
             return volt, sec, all_attns

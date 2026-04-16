@@ -1,3 +1,5 @@
+# data/generate_pandapower.py
+
 import os
 import argparse
 import numpy as np
@@ -140,26 +142,18 @@ class PowerFlowDataset(Dataset):
             torch.save(data_list, path)
 
     def len(self):
-        total = 0
-        for name in self.system_names:
-            path = os.path.join(self.processed_dir, f"{name}_data.pt")
-            if os.path.exists(path):
-                data_list = torch.load(path, weights_only=False)
-                total += len(data_list)
-        return total
+        if not hasattr(self, '_data_cache'):
+            self._data_cache = []
+            for name in self.system_names:
+                path = os.path.join(self.processed_dir, f"{name}_data.pt")
+                if os.path.exists(path):
+                    self._data_cache.extend(torch.load(path, weights_only=False))
+        return len(self._data_cache)
 
     def get(self, idx):
-        # Simple flat indexing across all systems
-        offset = 0
-        for name in self.system_names:
-            path = os.path.join(self.processed_dir, f"{name}_data.pt")
-            if not os.path.exists(path):
-                continue
-            data_list = torch.load(path, weights_only=False)
-            if idx < offset + len(data_list):
-                return data_list[idx - offset]
-            offset += len(data_list)
-        raise IndexError(f"Index {idx} out of range")
+        if not hasattr(self, '_data_cache'):
+            self.len()  # trigger caching
+        return self._data_cache[idx]
 
 
 def main():

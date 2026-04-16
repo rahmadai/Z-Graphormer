@@ -1,3 +1,5 @@
+# models/zbus_encoding.py
+
 import math
 import torch
 import torch.nn as nn
@@ -28,19 +30,10 @@ class ZBusRelativeEncoding(nn.Module):
         self.embedding = nn.Embedding(num_bins, num_heads)
 
     def _digitize(self, z_vals: torch.Tensor) -> torch.Tensor:
-        """Assign each |Z_ij| to a bin index."""
-        # z_vals: [E]
-        # Expand for broadcasting: [E, 1] vs [num_bins + 1]
-        expanded = z_vals.unsqueeze(-1)  # [E, 1]
-        edges = self.bin_edges.unsqueeze(0)  # [1, num_bins + 1]
-
-        # Find which bin each value falls into
-        # True where expanded >= edges
-        ge = expanded >= edges  # [E, num_bins + 1]
-        # Sum across edges to get bin index
-        bin_idx = ge.sum(dim=-1) - 1  # [E]
-        bin_idx = bin_idx.clamp(min=0, max=self.num_bins - 1)
-        return bin_idx
+        """Assign each |Z_ij| to a bin index using torch.bucketize."""
+        # Values below bin_edges[1] -> 0, above bin_edges[-2] -> num_bins-1
+        bin_idx = torch.bucketize(z_vals, self.bin_edges[1:-1])
+        return bin_idx.clamp(min=0, max=self.num_bins - 1)
 
     def forward(self, z_vals: torch.Tensor) -> torch.Tensor:
         """

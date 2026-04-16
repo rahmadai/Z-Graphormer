@@ -1,3 +1,5 @@
+# data/cross_topology_loader.py
+
 from torch.utils.data import DataLoader
 from torch_geometric.data import Data, Batch
 
@@ -8,7 +10,6 @@ def collate_variable_n(data_list):
     PyG Batch will handle x and assignment vectors; we ensure z_matrix is stored
     as a list so it does not try to stack tensors of different sizes.
     """
-    # Temporarily remove z_matrix from each Data object, batch the rest, then reattach
     z_matrices = [d.z_matrix for d in data_list]
     for d in data_list:
         d.z_matrix = None
@@ -18,11 +19,13 @@ def collate_variable_n(data_list):
     return batch
 
 
-def get_dataloader(dataset, batch_size: int = 32, shuffle: bool = True, num_workers: int = 0):
+def get_dataloader(dataset, batch_size: int = 32, shuffle: bool = True, num_workers: int = 4):
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True if num_workers > 0 else False,
         collate_fn=collate_variable_n,
     )

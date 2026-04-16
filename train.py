@@ -1,3 +1,4 @@
+# train.py
 import os
 import csv
 import argparse
@@ -66,6 +67,7 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--alpha", type=float, default=0.5)
+    parser.add_argument("--num_workers", type=int, default=4)
     args = parser.parse_args()
 
     os.makedirs(args.data_root, exist_ok=True)
@@ -80,9 +82,9 @@ def main():
     test_size = n - train_size - val_size
     train_ds, val_ds, test_ds = torch.utils.data.random_split(dataset, [train_size, val_size, test_size])
 
-    train_loader = get_dataloader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_loader = get_dataloader(val_ds, batch_size=args.batch_size, shuffle=False)
-    test_loader = get_dataloader(test_ds, batch_size=args.batch_size, shuffle=False)
+    train_loader = get_dataloader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    val_loader = get_dataloader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    test_loader = get_dataloader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     device = torch.device(args.device)
     model = ZGraphormer(d_model=128, num_heads=8, num_layers=4, d_ff=512).to(device)
