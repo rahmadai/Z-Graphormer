@@ -11,10 +11,14 @@ def collate_variable_n(data_list):
     as a list so it does not try to stack tensors of different sizes.
     """
     z_matrices = [d.z_matrix for d in data_list]
+    # Create shallow copies so we don't mutate the cached Data objects
+    copied = []
     for d in data_list:
-        d.z_matrix = None
+        c = d.clone()
+        c.z_matrix = None
+        copied.append(c)
 
-    batch = Batch.from_data_list(data_list)
+    batch = Batch.from_data_list(copied)
     batch.z_matrix = z_matrices
     return batch
 
