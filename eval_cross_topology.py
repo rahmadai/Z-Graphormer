@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from torchmetrics.classification import BinaryF1Score
 
-from models.zgraphormer import ZGraphormer
+from models.elecformer import ElecFormer
 from data.generate_pandapower import PowerFlowDataset
 from data.cross_topology_loader import get_dataloader
 
@@ -44,13 +44,13 @@ def main():
     args = parser.parse_args()
 
     device = torch.device(args.device)
-    model = ZGraphormer(d_model=128, num_heads=8, num_layers=4, d_ff=512).to(device)
+    model = ElecFormer(in_channels=9, d_node=128, d_pair=64, num_heads=8, num_layers=4, d_ff=512).to(device)
     model.load_state_dict(torch.load(args.checkpoint, map_location=device))
 
     for sys_name in args.test_systems:
         dataset = PowerFlowDataset(root=args.data_root, system_names=[sys_name], num_samples=args.num_samples)
         dataset.process()
-        loader = get_dataloader(dataset, batch_size=16, shuffle=False)
+        loader = get_dataloader(dataset, batch_size=16, shuffle=False, num_workers=0)
         metrics = evaluate_zero_shot(model, loader, device)
         print(f"{sys_name}: MAE={metrics['mae']:.5f} p.u., MaxErr={metrics['max_err']:.5f} p.u., F1={metrics['f1']:.4f}")
 

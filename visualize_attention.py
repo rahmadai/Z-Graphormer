@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from models.zgraphormer import ZGraphormer
+from models.elecformer import ElecFormer
 from data.generate_pandapower import PowerFlowDataset
 from data.cross_topology_loader import get_dataloader
 
@@ -19,16 +19,15 @@ def plot_sample(model, batch, graph_idx: int = 0, layer_idx: int = -1, save_path
     graph_ids = torch.unique(assign, sorted=True)
     gid = graph_ids[graph_idx]
     mask = assign == gid
-    node_offset = mask.nonzero(as_tuple=True)[0][0].item()
     n_nodes = mask.sum().item()
 
     # Extract Z-matrix for this graph
     z_mat = batch.z_matrix[graph_idx].cpu().numpy()  # [N, N]
 
     # Extract attention for chosen layer, averaged over heads
-    # all_attns is now list of [B, h, N, N] tensors, one per layer
-    attn_batch = all_attns[layer_idx]  # [B, h, N, N]
-    attn = attn_batch[graph_idx, :, :n_nodes, :n_nodes].mean(dim=0).cpu().numpy()  # [N, N]
+    # all_attns is list of [B, N, N, h] tensors, one per layer
+    attn_batch = all_attns[layer_idx]  # [B, N, N, h]
+    attn = attn_batch[graph_idx, :n_nodes, :n_nodes, :].mean(dim=-1).cpu().numpy()  # [N, N]
 
     # Extract predictions / targets for this graph
     v_pred = volt[mask].cpu().numpy().squeeze()
@@ -92,7 +91,7 @@ def main():
     args = parser.parse_args()
 
     device = torch.device(args.device)
-    model = ZGraphormer(d_model=128, num_heads=8, num_layers=4, d_ff=512).to(device)
+    model = ElecFormer(in_channels=9, d_node=128, d_pair=64, num_heads=8, num_layers=4, d_ff=512).to(device)
     if os.path.exists(args.checkpoint):
         model.load_state_dict(torch.load(args.checkpoint, map_location=device))
     else:
@@ -101,7 +100,7 @@ def main():
     dataset = PowerFlowDataset(root=args.data_root, system_names=[args.system], num_samples=args.num_samples)
     if not os.path.exists(os.path.join(dataset.processed_dir, f"{args.system}_data.pt")):
         dataset.process()
-    loader = get_dataloader(dataset, batch_size=4, shuffle=False)
+    loader = get_dataloader(dataset, batch_size=4, shuffle=False, num_workers=0)
 
     batch = next(iter(loader)).to(device)
     plot_sample(model, batch, graph_idx=args.graph_idx, layer_idx=args.layer_idx, save_path=args.out)

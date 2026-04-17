@@ -1,4 +1,3 @@
-# train.py
 import os
 import csv
 import argparse
@@ -8,22 +7,23 @@ import torch.nn as nn
 from torch.optim import AdamW
 from tqdm import tqdm
 
-from models.zgraphormer import ZGraphormer
+from models.elecformer import ElecFormer
 from data.generate_pandapower import PowerFlowDataset
 from data.cross_topology_loader import get_dataloader
 
 
-def train_epoch(model, loader, optimizer, device, alpha=0.5):
+def train_epoch(model, loader, optimizer, device, alpha=0.5, pos_weight=1.0):
     model.train()
     total_loss = 0.0
     total_vloss = 0.0
     total_sloss = 0.0
+    pw = torch.tensor([pos_weight], dtype=torch.float, device=device)
     for batch in tqdm(loader, desc="Train", leave=False):
         batch = batch.to(device)
         volt, sec = model(batch)
 
-        v_loss = nn.MSELoss()(volt, batch.y_volt)
-        s_loss = nn.BCEWithLogitsLoss()(sec, batch.y_sec.unsqueeze(1))
+        v_loss = nn.L1Loss()(volt, batch.y_volt)
+        s_loss = nn.BCEWithLogitsLoss(pos_weight=pw)(sec, batch.y_sec.unsqueeze(1))
         loss = alpha * v_loss + (1 - alpha) * s_loss
 
         optimizer.zero_grad()
@@ -38,17 +38,18 @@ def train_epoch(model, loader, optimizer, device, alpha=0.5):
     return total_loss / n, total_vloss / n, total_sloss / n
 
 
-def evaluate(model, loader, device, alpha=0.5):
+def evaluate(model, loader, device, alpha=0.5, pos_weight=1.0):
     model.eval()
     total_loss = 0.0
     total_vloss = 0.0
     total_sloss = 0.0
+    pw = torch.tensor([pos_weight], dtype=torch.float, device=device)
     with torch.no_grad():
         for batch in tqdm(loader, desc="Val  ", leave=False):
             batch = batch.to(device)
             volt, sec = model(batch)
-            v_loss = nn.MSELoss()(volt, batch.y_volt)
-            s_loss = nn.BCEWithLogitsLoss()(sec, batch.y_sec.unsqueeze(1))
+            v_loss = nn.L1Loss()(volt, batch.y_volt)
+            s_loss = nn.BCEWithLogitsLoss(pos_weight=pw)(sec, batch.y_sec.unsqueeze(1))
             loss = alpha * v_loss + (1 - alpha) * s_loss
             total_loss += loss.item()
             total_vloss += v_loss.item()
@@ -67,7 +68,9 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--alpha", type=float, default=0.5)
+    parser.add_argument("--pos_weight", type=float, default=1.0)
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume")
     args = parser.parse_args()
 
     os.makedirs(args.data_root, exist_ok=True)
@@ -87,7 +90,12 @@ def main():
     test_loader = get_dataloader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     device = torch.device(args.device)
-    model = ZGraphormer(d_model=128, num_heads=8, num_layers=4, d_ff=512).to(device)
+    model = ElecFormer(in_channels=9, d_node=128, d_pair=64, num_heads=8, num_layers=4, d_ff=512).to(device)
+
+    if args.resume and os.path.exists(args.resume):
+        model.load_state_dict(torch.load(args.resume, map_location=device))
+        print(f"Resumed from {args.resume}")
+
     optimizer = AdamW(model.parameters(), lr=args.lr)
 
     metrics_path = os.path.join(args.data_root, "metrics.csv")
@@ -98,8 +106,8 @@ def main():
         best_val = float("inf")
         for epoch in range(1, args.epochs + 1):
             epoch_start = time.time()
-            t_loss, t_v, t_s = train_epoch(model, train_loader, optimizer, device, alpha=args.alpha)
-            v_loss, v_v, v_s = evaluate(model, val_loader, device, alpha=args.alpha)
+            t_loss, t_v, t_s = train_epoch(model, train_loader, optimizer, device, alpha=args.alpha, pos_weight=args.pos_weight)
+            v_loss, v_v, v_s = evaluate(model, val_loader, device, alpha=args.alpha, pos_weight=args.pos_weight)
             elapsed = time.time() - epoch_start
             print(f"Epoch {epoch:03d}/{args.epochs} | {elapsed:.1f}s | Train: {t_loss:.4f} (V={t_v:.4f}, S={t_s:.4f}) | Val: {v_loss:.4f} (V={v_v:.4f}, S={v_s:.4f})")
             writer.writerow([epoch, f"{t_loss:.6f}", f"{t_v:.6f}", f"{t_s:.6f}", f"{v_loss:.6f}", f"{v_v:.6f}", f"{v_s:.6f}"])
@@ -108,7 +116,7 @@ def main():
                 best_val = v_loss
                 torch.save(model.state_dict(), os.path.join(args.data_root, "best_model.pt"))
 
-    test_loss, test_v, test_s = evaluate(model, test_loader, device, alpha=args.alpha)
+    test_loss, test_v, test_s = evaluate(model, test_loader, device, alpha=args.alpha, pos_weight=args.pos_weight)
     print(f"Test Loss: {test_loss:.4f} (V={test_v:.4f}, S={test_s:.4f})")
 
 
