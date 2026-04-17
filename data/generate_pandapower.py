@@ -25,7 +25,7 @@ def generate_sample(base_net, contingency_prob: float = 0.3, load_scale_range=(0
     """
     Generate one power flow sample with random load scaling and possible N-1 contingency.
     Returns:
-        net (after power flow), converged (bool), features (np.ndarray)
+        data (Data) or None
     """
     import copy
     net = copy.deepcopy(base_net)
@@ -36,11 +36,9 @@ def generate_sample(base_net, contingency_prob: float = 0.3, load_scale_range=(0
     net.load["q_mvar"] *= scale
 
     # Optional N-1 contingency
-    line_out = False
     if np.random.rand() < contingency_prob and len(net.line) > 0:
         line_idx = np.random.randint(len(net.line))
         net.line.loc[line_idx, 'in_service'] = False
-        line_out = True
 
     # Run power flow
     try:
@@ -52,13 +50,8 @@ def generate_sample(base_net, contingency_prob: float = 0.3, load_scale_range=(0
     if not converged:
         return None
 
-    # Extract node features
-    # For each bus: [V_pu, delta_deg, P_gen, Q_gen, type_onehot...]
-    # Simplify: [V, delta, P, Q, type] where type is one-hot encoded in a scalar for simplicity
-    # Actually let's use 5-dim: [V, delta, P, Q, type_idx] and handle type in model if needed
     n_bus = len(net.bus)
     res_bus = net.res_bus
-    # Map bus index to results
     vm = res_bus.vm_pu.values
     va = res_bus.va_degree.values
 
@@ -66,33 +59,20 @@ def generate_sample(base_net, contingency_prob: float = 0.3, load_scale_range=(0
     p_inj = np.zeros(n_bus)
     q_inj = np.zeros(n_bus)
 
-    # Add generation
     for _, gen in net.gen.iterrows():
         bus = gen.bus
         p_inj[bus] += gen.p_mw
-        # Q from results
     for _, sgen in net.sgen.iterrows():
         bus = sgen.bus
         p_inj[bus] += sgen.p_mw
-
-    # Subtract load
     for _, load in net.load.iterrows():
         bus = load.bus
         p_inj[bus] -= load.p_mw
         q_inj[bus] -= load.q_mvar
-
-    # Gen Q from res_gen if available
     if len(net.res_gen) > 0:
         for idx, q in net.res_gen.q_mvar.items():
             bus = net.gen.bus.loc[idx]
             q_inj[bus] += q
-
-    bus_type = net.bus.in_service.values.astype(np.float32)  # placeholder; use 0/1 for now
-    # Better: encode bus type (ref=3, pv=2, pq=1) normalized
-    type_map = {"ref": 3, "pv": 2, "pq": 1}
-    type_vals = net.bus["type"].map(type_map).fillna(1).values.astype(np.float32) / 3.0
-
-    features = np.stack([vm, va, p_inj, q_inj, type_vals], axis=1).astype(np.float32)
 
     # Security label
     vm_secure = np.all((vm >= 0.95) & (vm <= 1.05))
@@ -100,19 +80,46 @@ def generate_sample(base_net, contingency_prob: float = 0.3, load_scale_range=(0
     line_secure = np.all(line_load < 100.0) if len(line_load) > 0 else True
     secure = float(vm_secure and line_secure and converged)
 
-    # Z-bus and centrality
+    # Z-bus and centrality (reuse already-run net)
     z_mag = compute_zbus_magnitude(net)
     centrality = compute_centrality(net, num_bins=10)
 
-    # Sanity check: dimensions must match number of buses
-    if z_mag.shape[0] != n_bus or centrality.shape[0] != n_bus or features.shape[0] != n_bus:
+    if z_mag.shape[0] != n_bus or centrality.shape[0] != n_bus:
         return None
+
+    # --- Scale-invariant node features (9-dim) ---
+    total_load = np.abs(p_inj).sum() + 1e-8
+    p_inj_norm = p_inj / total_load
+    q_inj_norm = q_inj / total_load
+
+    va_rad = np.deg2rad(va)
+    z_diag = np.diag(z_mag)
+    zbus_diag_normalized = z_diag / (np.median(z_diag) + 1e-8)
+
+    # One-hot bus type [ref, pv, pq]
+    type_onehot = np.zeros((n_bus, 3), dtype=np.float32)
+    type_map = {"ref": 0, "pv": 1, "pq": 2}
+    for t, idx in type_map.items():
+        type_onehot[:, idx] = (net.bus["type"] == t).values.astype(np.float32)
+
+    features = np.stack(
+        [
+            vm,
+            np.sin(va_rad),
+            np.cos(va_rad),
+            p_inj_norm,
+            q_inj_norm,
+            zbus_diag_normalized,
+        ],
+        axis=1,
+    ).astype(np.float32)
+    features = np.concatenate([features, type_onehot], axis=1)  # [N, 9]
 
     data = Data(
         x=torch.from_numpy(features),
         z_matrix=torch.from_numpy(z_mag).float(),
         centrality=torch.from_numpy(centrality).long(),
-        y_volt=torch.from_numpy(vm).float().unsqueeze(1),  # target voltage
+        y_volt=torch.from_numpy(vm).float().unsqueeze(1),
         y_sec=torch.tensor([secure], dtype=torch.float),
         n_bus=n_bus,
     )
@@ -152,7 +159,7 @@ class PowerFlowDataset(Dataset):
 
     def get(self, idx):
         if not hasattr(self, '_data_cache'):
-            self.len()  # trigger caching
+            self.len()
         return self._data_cache[idx]
 
 
